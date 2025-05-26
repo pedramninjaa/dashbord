@@ -496,7 +496,7 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
         except ValueError: pass
 
     fig.update_layout(
-        title=dict(text=title_text_plotly, x=0.5, font=dict(size=18)),
+        title=dict(text=title_text_plotly, x=0, font=dict(size=30)),
         showlegend=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10), itemsizing='constant'),
         dragmode='pan', margin=dict(l=20, r=20, t=50, b=20), hovermode='closest'

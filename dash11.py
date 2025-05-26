@@ -140,12 +140,7 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
         print(f"خطا: ستون‌های ضروری ({', '.join(missing_cols)}) در دیتافریم مختصات (فایل liness.xlsx) یافت نشد. لطفاً اطمینان حاصل کنید ستون 'name' برای اسامی ایستگاه‌ها موجود است.")
         return go.Figure()
 
-    # =========================================================================
-    # تعریف ایستگاه‌های پایانی قطعی مورد نظر شما
-    # این ایستگاه‌ها اجازه نخواهند داشت که در مسیر اصلی خط به ایستگاه دیگری متصل شوند.
     HARD_TERMINAL_STATIONS = {92, 202} 
-    # می‌توانید ایستگاه‌های دیگری را نیز به این مجموعه اضافه کنید.
-    # =========================================================================
 
     edge_details = {}
     filtered_df = capacity_df.copy()
@@ -216,15 +211,15 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
             )
         )
         fig.update_xaxes(range=[0, img_pil.width], showgrid=False, zeroline=False, visible=False)
-        fig.update_yaxes(range=[img_pil.height, 0], showgrid=False, zeroline=False, visible=False)
+        fig.update_yaxes(range=[img_pil.height, 0], showgrid=False, zeroline=False, visible=False) # Y-axis inverted for image
     else:
         all_x = [info['x'] for info in station_coords_from_pos_df.values()]
         all_y = [info['y'] for info in station_coords_from_pos_df.values()]
         if all_x and all_y:
-            padding_x = (max(all_x) - min(all_x)) * 0.1
-            padding_y = (max(all_y) - min(all_y)) * 0.1
+            padding_x = (max(all_x) - min(all_x)) * 0.1 if max(all_x) != min(all_x) else 10
+            padding_y = (max(all_y) - min(all_y)) * 0.1 if max(all_y) != min(all_y) else 10
             fig.update_xaxes(range=[min(all_x) - padding_x, max(all_x) + padding_x], visible=False)
-            fig.update_yaxes(range=[max(all_y) + padding_y, min(all_y) - padding_y], visible=False)
+            fig.update_yaxes(range=[max(all_y) + padding_y, min(all_y) - padding_y], visible=False) # Normal Y-axis
 
     edge_color_palette = {'green': '#2ECC71', 'yellow': '#F1C40F', 'orange': '#E67E22', 'red': '#E74C3C', 'over_capacity': '#000000', 'default': '#BDC3C7'}
 
@@ -249,34 +244,119 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
             width = 2.5
         return color, width
 
-    offset_distance = 7
-    
-    # این دیکشنری انشعاب از کد اصلی شماست. در صورت نیاز آن را به‌روز کنید.
-    branching_original = {'1': {122: [123, 91]}, '4': {205: [203, 206]}}
+    branching_original = {'1': {122: [123, 91]}, '4': {205: [203, 206]}} # طبق کد شما
     branching_int_keys = {}
-    for line_key, branch_dict_val in branching_original.items():
+    for line_key_str, branch_dict_val in branching_original.items():
         new_branch_dict = {}
-        for station_key, destinations in branch_dict_val.items():
-            try:
-                new_branch_dict[int(station_key)] = [int(d) for d in destinations]
-            except ValueError:
-                 print(f"هشدار: کلید ایستگاه یا مقصد انشعاب '{station_key}' / '{destinations}' در خط '{line_key}' عدد معتبر نیست.")
-                 new_branch_dict[station_key] = destinations
-        branching_int_keys[line_key] = new_branch_dict
-    branching = branching_int_keys # از این پس branching دارای کلیدهای عددی برای ایستگاه‌ها است
+        try:
+            # اطمینان از اینکه line_key_str برای کلید branching_int_keys هم معتبر است
+            # اگرچه در کد شما line_key_str مستقیماً استفاده می‌شود و به نظر می‌رسد مشکلی ندارد.
+            # line_key_for_branching = int(line_key_str) # اگر لازم است کلیدهای اصلی branching هم int باشند
+            for station_key_str, destinations_str in branch_dict_val.items():
+                try:
+                    station_key_int = int(station_key_str)
+                    destinations_int = [int(d) for d in destinations_str]
+                    new_branch_dict[station_key_int] = destinations_int
+                except ValueError:
+                    print(f"هشدار: کلید ایستگاه انشعاب '{station_key_str}' یا مقاصد '{destinations_str}' در خط '{line_key_str}' عدد معتبر نیستند.")
+                    new_branch_dict[station_key_str] = destinations_str # حفظ مقادیر نامعتبر برای جلوگیری از خطا
+            branching_int_keys[line_key_str] = new_branch_dict # استفاده از line_key_str اصلی به عنوان کلید
+        except ValueError:
+            print(f"هشدار: کلید خط انشعاب '{line_key_str}' عدد معتبر نیست.")
+            branching_int_keys[line_key_str] = branch_dict_val # حفظ مقادیر نامعتبر
 
-    processed_segments_for_legend = set()
+    branching = branching_int_keys
+
+    # --- Pre-computation of segment usage ---
+    segment_line_map = {}  # Key: tuple(sorted(from_station_id, to_station_id)), Value: list of line_numbers
+    line_specific_directed_segments = {}  # Key: line_number_int, Value: list of tuples (from_s_id, to_s_id)
+
+    for line_col_name_outer in line_data_df.columns:
+        line_number_str_outer = str(line_col_name_outer).strip()
+        try:
+            line_number_int_outer = int(line_number_str_outer)
+        except ValueError:
+            print(f"هشدار: نام ستون خط '{line_number_str_outer}' یک عدد معتبر نیست (پیش‌پردازش مسیرها).")
+            continue
+        
+        stations_on_line_outer = line_data_df[line_col_name_outer].dropna().astype(int).tolist()
+        if not stations_on_line_outer:
+            continue
+
+        segments_to_process_for_this_line = []
+        temp_path_outer = []
+        # مهم: کلیدهای branching باید با line_number_str_outer مطابقت داشته باشند
+        current_branching_for_line_outer = branching.get(line_number_str_outer, {})
+
+
+        for i_outer in range(len(stations_on_line_outer)):
+            s_outer = stations_on_line_outer[i_outer] # s_outer is an int station ID
+            temp_path_outer.append(s_outer)
+            
+            is_branch_point = s_outer in current_branching_for_line_outer
+            is_last_point_in_sequence = i_outer == len(stations_on_line_outer) - 1
+
+            if is_branch_point or is_last_point_in_sequence:
+                if len(temp_path_outer) > 1:
+                    for j_outer in range(len(temp_path_outer) - 1):
+                        start_node_outer = temp_path_outer[j_outer]
+                        end_node_outer = temp_path_outer[j_outer+1]
+                        
+                        if start_node_outer in HARD_TERMINAL_STATIONS:
+                            continue 
+                        segments_to_process_for_this_line.append((start_node_outer, end_node_outer))
+                
+                if is_branch_point:
+                    branch_destinations_outer = current_branching_for_line_outer[s_outer]
+                    for dest_station_outer in branch_destinations_outer:
+                        try:
+                            dest_station_int = int(dest_station_outer)
+                            segments_to_process_for_this_line.append((s_outer, dest_station_int))
+                        except ValueError:
+                            print(f"هشدار: مقصد انشعاب نامعتبر '{dest_station_outer}' برای ایستگاه {s_outer} در خط {line_number_str_outer}")
+                    temp_path_outer = [s_outer] 
+        
+        # Store directed segments for the current line, avoid duplicates for THIS line
+        current_line_unique_directed_segments = []
+        seen_directed_for_current_line = set()
+        for seg_start, seg_end in segments_to_process_for_this_line:
+            try:
+                s_start = int(seg_start)
+                s_end = int(seg_end)
+                directed_segment = (s_start, s_end)
+                
+                if directed_segment not in seen_directed_for_current_line:
+                    current_line_unique_directed_segments.append(directed_segment)
+                    seen_directed_for_current_line.add(directed_segment)
+
+                    physical_segment = tuple(sorted(directed_segment))
+                    if physical_segment not in segment_line_map:
+                        segment_line_map[physical_segment] = []
+                    if line_number_int_outer not in segment_line_map[physical_segment]:
+                        segment_line_map[physical_segment].append(line_number_int_outer)
+            except ValueError:
+                print(f"هشدار: شناسه ایستگاه نامعتبر در بخش ({seg_start}-{seg_end}) برای خط {line_number_str_outer} (پیش‌پردازش).")
+                continue
+        line_specific_directed_segments[line_number_int_outer] = current_line_unique_directed_segments
+
+    for seg_key in segment_line_map:
+        segment_line_map[seg_key].sort()
+
+    INTRA_LINE_OFFSET_DISTANCE = 3  # نصف فاصله بین مسیر رفت و برگشت همان خط
+    INTER_LINE_SPACING_FACTOR = 8 # فاصله بین خطوط مرکزی خطوط موازی مجاور
+
+    lines_added_to_legend = set() # برای کنترل آیتم‌های لجند (یک آیتم به ازای هر خط)
     
-    termini_stations_info = {}
+    termini_stations_info = {} # مانند کد اصلی شما برای انوتیشن ها
     for line_col_name in line_data_df.columns:
         line_number_str = str(line_col_name).strip()
         try:
-            line_number_int = int(line_number_str)
+            line_number_int = int(line_number_str) # استفاده نمی‌شود اما برای سازگاری با بقیه کد شما
         except ValueError:
-            print(f"هشدار: نام ستون خط '{line_number_str}' یک عدد معتبر نیست. از این خط صرف نظر می‌شود.")
+            # هشدار قبلاً در پیش‌پردازش داده شده است
             continue
             
-        stations_on_line_for_termini = line_data_df[line_col_name].dropna().astype(int).tolist() # نام متغیر تغییر کرد تا تداخل نکند
+        stations_on_line_for_termini = line_data_df[line_col_name].dropna().astype(int).tolist()
         if stations_on_line_for_termini:
             first_station_id = stations_on_line_for_termini[0]
             last_station_id = stations_on_line_for_termini[-1]
@@ -289,126 +369,104 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
                 termini_stations_info[last_station_id] = set()
             termini_stations_info[last_station_id].add(f"خط {line_number_str} (انتها)")
 
-    for line_col_name in line_data_df.columns:
-        line_number_str = str(line_col_name).strip()
-        try:
-            line_number_int = int(line_number_str)
-        except ValueError:
-            continue # هشدار قبلاً داده شده است
 
-        stations_on_line = line_data_df[line_col_name].dropna().astype(int).tolist()
-        segments_to_process = [] # لیست سگمنت‌ها برای این خط خاص
-        temp_path = []
-        
-        current_branching_for_line = branching.get(line_number_str, {})
+    # --- Main Drawing Loop ---
+    sorted_lines_to_draw = sorted(line_specific_directed_segments.keys())
 
-        for i in range(len(stations_on_line)):
-            s = stations_on_line[i] # s شناسه عددی ایستگاه است
-            temp_path.append(s)
-            
-            if s in current_branching_for_line: # اگر s یک نقطه انشعاب باشد
-                if len(temp_path) > 1: 
-                    for j in range(len(temp_path) - 1): 
-                        start_node = temp_path[j]
-                        end_node = temp_path[j+1]
-                        
-                        # === تغییر اعمال شده ===
-                        if start_node in HARD_TERMINAL_STATIONS:
-                            continue 
-                        # === پایان تغییر ===
-                        segments_to_process.append((start_node, end_node))
-                
-                branch_destinations = current_branching_for_line[s]
-                for dest_station in branch_destinations:
-                    segments_to_process.append((s, dest_station))
-                
-                temp_path = [s]
-            
-            elif i == len(stations_on_line) - 1: 
-                if len(temp_path) > 1:
-                     for j in range(len(temp_path) - 1):
-                        start_node = temp_path[j]
-                        end_node = temp_path[j+1]
-                        
-                        # === تغییر اعمال شده ===
-                        if start_node in HARD_TERMINAL_STATIONS:
-                            continue
-                        # === پایان تغییر ===
-                        segments_to_process.append((start_node, end_node))
-        
-        unique_segments = []
-        seen_segments = set()
-        for seg_start, seg_end in segments_to_process:
-            try:
-                s_start = int(seg_start)
-                s_end = int(seg_end)
-                sorted_seg = tuple(sorted((s_start, s_end))) # برای جلوگیری از رسم دوباره سگمنت در جهت مخالف (اگر داده‌ها شامل هر دو جهت باشند)
-                                                            # یا اگر نمی‌خواهید این کار را بکنید، این خط را بردارید و از (s_start, s_end) استفاده کنید.
-                                                            # در کد اصلی شما، این مرتب‌سازی وجود داشت برای unique_segments، پس حفظ شده است.
-                if sorted_seg not in seen_segments:
-                    unique_segments.append((s_start, s_end)) # ذخیره به صورت اصلی برای حفظ جهت‌دهی احتمالی
-                    seen_segments.add(sorted_seg)
-            except ValueError:
-                print(f"هشدار: شناسه ایستگاه نامعتبر در بخش ({seg_start}-{seg_end}) برای خط {line_number_str}")
-                continue
+    for line_number_int_current_draw_loop in sorted_lines_to_draw:
+        line_number_str_current_draw_loop = str(line_number_int_current_draw_loop)
+        current_line_directed_segments = line_specific_directed_segments.get(line_number_int_current_draw_loop, [])
 
-        for from_s_id, to_s_id in unique_segments:
+        for from_s_id, to_s_id in current_line_directed_segments:
             if from_s_id not in station_coords_from_pos_df or to_s_id not in station_coords_from_pos_df:
-                print(f"هشدار: مختصات برای ایستگاه {from_s_id} یا {to_s_id} در خط {line_number_str} یافت نشد.")
+                print(f"هشدار: مختصات برای ایستگاه {from_s_id} یا {to_s_id} در خط {line_number_str_current_draw_loop} یافت نشد (حلقه رسم).")
                 continue
 
             p1_actual = (station_coords_from_pos_df[from_s_id]['x'], station_coords_from_pos_df[from_s_id]['y'])
             p2_actual = (station_coords_from_pos_df[to_s_id]['x'], station_coords_from_pos_df[to_s_id]['y'])
 
-            # Forward direction (از from_s_id به to_s_id)
-            key_fwd = (from_s_id, to_s_id, line_number_int, "forward") # یا هر جهتی که در داده‌هایتان دارید
-            details_fwd = edge_details.get(key_fwd, {})
-            util_fwd = details_fwd.get('capacity', np.nan)
-            pass_fwd = details_fwd.get('passengers', 'N/A')
-            color_fwd, width_fwd = get_edge_style_plotly(util_fwd)
-            off_x_fwd, off_y_fwd = calculate_perpendicular_offset(p1_actual, p2_actual, offset_distance)
-            p1_fwd_viz = (p1_actual[0] + off_x_fwd, p1_actual[1] + off_y_fwd)
-            p2_fwd_viz = (p2_actual[0] + off_x_fwd, p2_actual[1] + off_y_fwd)
+            physical_segment_key = tuple(sorted((from_s_id, to_s_id)))
             
+            lines_on_this_physical_segment = segment_line_map.get(physical_segment_key)
+            if not lines_on_this_physical_segment:
+                lines_on_this_physical_segment = [line_number_int_current_draw_loop] # فال‌بک
+
+            current_line_rank = -1
+            try:
+                current_line_rank = lines_on_this_physical_segment.index(line_number_int_current_draw_loop)
+            except ValueError:
+                # اگر خط در لیست نبود (که نباید اتفاق بیفتد اگر پیش‌پردازش درست باشد)، آن را اضافه کن
+                # این حالت بیشتر برای اطمینان است
+                temp_list = list(lines_on_this_physical_segment) # کپی برای تغییر
+                temp_list.append(line_number_int_current_draw_loop)
+                temp_list.sort()
+                lines_on_this_physical_segment = temp_list # به‌روزرسانی برای استفاده در این تکرار
+                current_line_rank = lines_on_this_physical_segment.index(line_number_int_current_draw_loop)
+                print(f"هشدار: خط {line_number_int_current_draw_loop} به لیست خطوط مسیر {physical_segment_key} اضافه شد (حین رنک‌بندی).")
+
+
+            num_lines_on_segment = len(lines_on_this_physical_segment)
+            line_center_shift = (current_line_rank - (num_lines_on_segment - 1) / 2.0) * INTER_LINE_SPACING_FACTOR
+
             from_station_display_edge = station_coords_from_pos_df[from_s_id].get('name', str(from_s_id))
             to_station_display_edge = station_coords_from_pos_df[to_s_id].get('name', str(to_s_id))
-
-            hover_text_fwd = (f"خط: {line_number_str} (رفت)<br>"
-                                         f"{from_station_display_edge} به {to_station_display_edge}<br>"
-                                         f"مسافر: {pass_fwd}<br>ظرفیت: {util_fwd if pd.notna(util_fwd) else 'N/A'}{'%' if pd.notna(util_fwd) else ''}")
-            legend_group_fwd = f"line_{line_number_str}_fwd_{from_s_id}_{to_s_id}" # برای یکتایی بیشتر
-            show_legend_fwd = legend_group_fwd not in processed_segments_for_legend
             
-            # بررسی اینکه آیا از to_s_id نباید به from_s_id متصل شویم (برای جلوگیری از رسم خطوط اضافی در unique_segments)
-            # این بخش در کد اصلی شما برای نمایش خطوط رفت و برگشت جداگانه بود.
-            fig.add_trace(go.Scatter(x=[p1_fwd_viz[0], p2_fwd_viz[0]], y=[p1_fwd_viz[1], p2_fwd_viz[1]],
-                                     mode='lines', line=dict(color=color_fwd, width=width_fwd),
-                                     hoverinfo='text', text=hover_text_fwd, name=(f"خط {line_number_str} ({from_station_display_edge} به {to_station_display_edge})"), # نامگذاری بهتر برای لجند
-                                     legendgroup=legend_group_fwd, showlegend=show_legend_fwd))
-            if show_legend_fwd: processed_segments_for_legend.add(legend_group_fwd)
+            legend_group_name = f"line_{line_number_str_current_draw_loop}"
+            show_this_line_in_legend = legend_group_name not in lines_added_to_legend
+
+            # مسیر مستقیم (رفت) بر اساس جهت قطعه (from_s_id -> to_s_id)
+            key_fwd_cap = (from_s_id, to_s_id, line_number_int_current_draw_loop, "forward") # فرض: "forward" برای این جهت
+            details_fwd_cap = edge_details.get(key_fwd_cap, {})
+            util_fwd_cap = details_fwd_cap.get('capacity', np.nan)
+            pass_fwd_cap = details_fwd_cap.get('passengers', 'N/A')
+            
+            if not (pd.isna(util_fwd_cap) and (pass_fwd_cap == 'N/A' or pd.isna(pass_fwd_cap))): # فقط اگر داده‌ای برای نمایش وجود دارد
+                color_fwd_cap, width_fwd_cap = get_edge_style_plotly(util_fwd_cap)
+                effective_offset_fwd = line_center_shift + INTRA_LINE_OFFSET_DISTANCE
+                off_x_fwd, off_y_fwd = calculate_perpendicular_offset(p1_actual, p2_actual, effective_offset_fwd)
+                p1_fwd_viz = (p1_actual[0] + off_x_fwd, p1_actual[1] + off_y_fwd)
+                p2_fwd_viz = (p2_actual[0] + off_x_fwd, p2_actual[1] + off_y_fwd)
+
+                hover_text_fwd = (f"خط: {line_number_str_current_draw_loop} (رفت: {direction})<br>"
+                                             f"{from_station_display_edge} به {to_station_display_edge}<br>"
+                                             f"مسافر: {pass_fwd_cap}<br>ظرفیت: {util_fwd_cap if pd.notna(util_fwd_cap) else 'N/A'}{'%' if pd.notna(util_fwd_cap) else ''}")
+                
+                fig.add_trace(go.Scatter(x=[p1_fwd_viz[0], p2_fwd_viz[0]], y=[p1_fwd_viz[1], p2_fwd_viz[1]],
+                                         mode='lines', line=dict(color=color_fwd_cap, width=width_fwd_cap),
+                                         hoverinfo='text', text=hover_text_fwd, 
+                                         name=f"خط {line_number_str_current_draw_loop}", # نام اصلی برای لجند
+                                         legendgroup=legend_group_name, 
+                                         showlegend=show_this_line_in_legend))
+                if show_this_line_in_legend:
+                    lines_added_to_legend.add(legend_group_name)
 
 
-            # Backward direction (از to_s_id به from_s_id)
-            key_bwd = (to_s_id, from_s_id, line_number_int, "backward") # یا هر جهتی که در داده‌هایتان دارید
-            details_bwd = edge_details.get(key_bwd, {})
-            util_bwd = details_bwd.get('capacity', np.nan)
-            pass_bwd = details_bwd.get('passengers', 'N/A')
-            color_bwd, width_bwd = get_edge_style_plotly(util_bwd)
-            off_x_bwd, off_y_bwd = calculate_perpendicular_offset(p1_actual, p2_actual, -offset_distance) # آفست منفی برای جهت مخالف
-            p1_bwd_viz = (p1_actual[0] + off_x_bwd, p1_actual[1] + off_y_bwd)
-            p2_bwd_viz = (p2_actual[0] + off_x_bwd, p2_actual[1] + off_y_bwd)
-            hover_text_bwd = (f"خط: {line_number_str} (برگشت)<br>"
-                                          f"{to_station_display_edge} به {from_station_display_edge}<br>"
-                                          f"مسافر: {pass_bwd}<br>ظرفیت: {util_bwd if pd.notna(util_bwd) else 'N/A'}{'%' if pd.notna(util_bwd) else ''}")
-            legend_group_bwd = f"line_{line_number_str}_bwd_{to_s_id}_{from_s_id}" # برای یکتایی بیشتر
-            show_legend_bwd = legend_group_bwd not in processed_segments_for_legend
+            # مسیر معکوس (برگشت) بر اساس جهت قطعه (to_s_id -> from_s_id)
+            key_bwd_cap = (to_s_id, from_s_id, line_number_int_current_draw_loop, "backward") # فرض: "backward" برای این جهت
+            details_bwd_cap = edge_details.get(key_bwd_cap, {})
+            util_bwd_cap = details_bwd_cap.get('capacity', np.nan)
+            pass_bwd_cap = details_bwd_cap.get('passengers', 'N/A')
 
-            fig.add_trace(go.Scatter(x=[p1_bwd_viz[0], p2_bwd_viz[0]], y=[p1_bwd_viz[1], p2_bwd_viz[1]],
-                                     mode='lines', line=dict(color=color_bwd, width=width_bwd),
-                                     hoverinfo='text', text=hover_text_bwd, name=(f"خط {line_number_str} ({to_station_display_edge} به {from_station_display_edge})"), # نامگذاری بهتر
-                                     legendgroup=legend_group_bwd, showlegend=show_legend_bwd))
-            if show_legend_bwd: processed_segments_for_legend.add(legend_group_bwd)
+            if not (pd.isna(util_bwd_cap) and (pass_bwd_cap == 'N/A' or pd.isna(pass_bwd_cap))): # فقط اگر داده‌ای برای نمایش وجود دارد
+                color_bwd_cap, width_bwd_cap = get_edge_style_plotly(util_bwd_cap)
+                effective_offset_bwd = line_center_shift - INTRA_LINE_OFFSET_DISTANCE
+                off_x_bwd, off_y_bwd = calculate_perpendicular_offset(p1_actual, p2_actual, effective_offset_bwd)
+                p1_bwd_viz = (p1_actual[0] + off_x_bwd, p1_actual[1] + off_y_bwd)
+                p2_bwd_viz = (p2_actual[0] + off_x_bwd, p2_actual[1] + off_y_bwd)
 
+                hover_text_bwd = (f"خط: {line_number_str_current_draw_loop} (برگشت: {direction})<br>"
+                                              f"{to_station_display_edge} به {from_station_display_edge}<br>"
+                                              f"مسافر: {pass_bwd_cap}<br>ظرفیت: {util_bwd_cap if pd.notna(util_bwd_cap) else 'N/A'}{'%' if pd.notna(util_bwd_cap) else ''}")
+                
+                fig.add_trace(go.Scatter(x=[p1_bwd_viz[0], p2_bwd_viz[0]], y=[p1_bwd_viz[1], p2_bwd_viz[1]],
+                                         mode='lines', line=dict(color=color_bwd_cap, width=width_bwd_cap),
+                                         hoverinfo='text', text=hover_text_bwd,
+                                         name=f"خط {line_number_str_current_draw_loop} (برگشت)", # نام متفاوت برای جلوگیری از همپوشانی در لجند اگر لازم باشد
+                                         legendgroup=legend_group_name, 
+                                         showlegend=False)) # مسیر برگشت معمولا در لجند جداگانه نشان داده نمی‌شود اگر مسیر رفت نماینده خط است
+
+
+    # --- Station Nodes Drawing (مانند کد اصلی شما) ---
     station_nodes_x = []
     station_nodes_y = []
     station_nodes_colors = []
@@ -416,7 +474,7 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
     station_node_ids = []
     station_node_sizes = []
     default_station_size = 10
-    terminus_station_size = 16 # اندازه بزرگتر برای ایستگاه‌های پایانی خطوط اصلی
+    terminus_station_size = 16 
     
     line_color_map_nodes = {'1': 'red', '2': 'blue', '3': 'skyblue', '4': 'yellow', '5': 'green', '6': 'pink', '7': 'purple', 'default': 'grey'}
 
@@ -425,15 +483,12 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
         station_nodes_y.append(info['y'])
         station_node_ids.append(info['id'])
 
-        # تشخیص اینکه آیا ایستگاه، پایانه یک خط اصلی است یا خیر (بر اساس termini_stations_info)
-        # HARD_TERMINAL_STATIONS برای جلوگیری از ادامه مسیر است، نه لزوما برای تغییر ظاهر.
-        # اگر می‌خواهید ظاهر این ایستگاه‌ها هم متفاوت باشد، می‌توانید شرطی برای آن اضافه کنید.
-        if info['id'] in termini_stations_info:
+        if info['id'] in termini_stations_info: # استفاده از termini_stations_info برای اندازه
             station_node_sizes.append(terminus_station_size)
         else:
             station_node_sizes.append(default_station_size)
 
-        lines_for_station = str(info['lines']).split(',')[0].strip() # استفاده از اولین خط برای رنگ‌بندی
+        lines_for_station = str(info['lines']).split(',')[0].strip() 
         station_nodes_colors.append(line_color_map_nodes.get(lines_for_station, line_color_map_nodes['default']))
         
         station_display_name = info.get('name', str(info['id']))
@@ -449,9 +504,10 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
             line=dict(width=1, color='DarkSlateGrey')
         ),
         hoverinfo='text', hoverlabel=dict(font_size=12), text=station_nodes_hover_texts,
-        name=('ایستگاه‌ها'), legendgroup="stations", showlegend=True
+        name='ایستگاه‌ها', legendgroup="stations", showlegend=True # ایستگاه‌ها همیشه در لجند نمایش داده شوند
     ))
     
+    # --- Annotations for Termini (مانند کد اصلی شما) ---
     annotations_list = []
     for station_id_key, roles_set in termini_stations_info.items():
         if station_id_key in station_coords_from_pos_df:
@@ -472,7 +528,7 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
                     xref="x",
                     yref="y",
                     text=annotation_text,
-                    showarrow=False,
+                    showarrow=False, # می توانید True بگذارید و ax, ay را تنظیم کنید
                     xanchor="left",
                     yanchor="bottom",
                     font=dict(family="Tahoma, sans-serif", size=10, color="#2c3e50"),
@@ -488,21 +544,22 @@ def draw_detailed_metro_map_plotly(capacity_df, line_data_df, pos_df, img_pil, s
             fig.layout.annotations = tuple()
         fig.layout.annotations += tuple(annotations_list)
 
-
-    title_text_plotly = ("نقشه شبکه مترو با نمایش ظرفیت و تعداد مسافر")
+    title_text_plotly = "نقشه شبکه مترو با نمایش ظرفیت و تعداد مسافر"
     if selected_hour is not None:
         try:
-            title_text_plotly += (f" - ساعت {int(selected_hour)}:00")
+            title_text_plotly += f" - ساعت {int(selected_hour)}:00"
         except ValueError: pass
 
     fig.update_layout(
-        title=dict(text=title_text_plotly, x=0, font=dict(size=30)),
-        showlegend=False,
+        title=dict(text=title_text_plotly, x=0.5, font=dict(size=24)), # x=0.5 برای وسط‌چین کردن عنوان
+        showlegend=False, # نمایش لجند
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10), itemsizing='constant'),
-        dragmode='pan', margin=dict(l=20, r=20, t=50, b=20), hovermode='closest'
+        dragmode='pan', margin=dict(l=20, r=20, t=70, b=20), # t (top margin) increased for title
+        hovermode='closest'
     )
-    if not img_pil:
-         fig.update_yaxes(autorange="reversed")
+    if not img_pil: # اگر تصویر پس‌زمینه وجود ندارد، محور Y را معکوس کنید (اگر مختصات شما مانند مختصات تصویر است)
+         fig.update_yaxes(autorange="reversed") # اگر مختصات Y شما از بالا به پایین افزایش می‌یابد، این را بردارید.
+
     return fig
 
 # --- Main App Logic ---
